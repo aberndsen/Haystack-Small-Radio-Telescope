@@ -1,0 +1,7 @@
+Aaron Berndsen:
+A python data class to analyze data from MIT's small radio telescope.
+
+routine reads user's lat/lon stored in the data file, and uses pyephem
+to determine positions of celestial objects.
+
+routines exist to understand the tracking of the SRT, and compare to the sun's true az/alt.
