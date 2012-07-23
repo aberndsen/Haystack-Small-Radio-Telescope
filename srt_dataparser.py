@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 """
-June 28th/ 2012: Aaron Berndsen (berndsen@phas.ubc.ca)
-
 A small routine to plot SRT data files. 
 The program should be smart enough to sort multiple files by date,
  and plot the sorted data.
@@ -18,18 +16,19 @@ d.data_info (ntsteps x (time az alt daz dalt freq mode))
 """
 import datetime
 import os
+import time
 from optparse import OptionParser
 import pylab as plt
 import numpy as np
 import re
 import ephem
-import wave
 
 #create a small font for the legend
 from matplotlib.font_manager import FontProperties
 fontP = FontProperties()
 fontP.set_size('small')
 from matplotlib import colors
+from mpl_toolkits.mplot3d import Axes3D 
 
 
 def main(files,opts):
@@ -51,19 +50,20 @@ def main(files,opts):
     if opts.spectrum:
         plot_spectrum(files)
 
-    if opts.playsound:
-        for f in files:
-            print "playing file %s" % f.fname
-            playsound(f.data,f.tsteps)
-
     if opts.plottracks:
         plot_tracks(files)
 
     if opts.plottrackoffsets:
-        plot_trackoffsets(files)
+        plot_trackoffsets(files, threshold=opts.threshold)
+
+    if opts.plottrackoffsets3d:
+        plot_trackoffsets3d(files, opts.fracofyear)
 
     if opts.plotnpointoffsets:
         plot_npointoffsets(files)
+
+    if opts.plotnpointoffsets3d:
+        plot_npointoffsets3d(files, opts.fracofyear)
 
 ############################################
 # SRTdata 
@@ -336,6 +336,7 @@ def plot_tracks(files=[],sun=True,xlim=(),ylim=()):
     sun: True/False, plot the sun's track?
     xlim: (xmin, xmax) [deg]
     ylim: (ymin, ymax) [deg]
+
     """
 
     if sun: suno = ephem.Sun(epoch=ephem.B1950)
@@ -386,7 +387,7 @@ def plot_tracks(files=[],sun=True,xlim=(),ylim=()):
                 plt.plot(sazs[-1],salts[-1],'%sx' % clr,markersize=12)
 
     plt.xlabel('Azimuth [deg]')
-    plt.ylabel('Elevation [deg]')
+    plt.ylabel('Altitude [deg]')
     if xlim:
          plt.xlim(xlim)
     if ylim:
@@ -401,10 +402,14 @@ def plot_tracks(files=[],sun=True,xlim=(),ylim=()):
     plt.show()
 
 
-def plot_trackoffsets(files):
+def plot_trackoffsets(files, threshold=360.):
     """
     given a list of SRTdata objects, plot the alt-az pointing
     offset from the sun.
+
+    Args:
+    files : list of srt data files/objects
+    threshold : only plot points within this many degrees.
 
     """
 
@@ -413,6 +418,78 @@ def plot_trackoffsets(files):
     talts = []
     trk_az_off = []
     trk_alt_off = []
+    seps = []
+    for f in files:
+    
+        azs = (f.data_info['az'] + f.data_info['az_off'])
+        alts = (f.data_info['alt'] + f.data_info['alt_off'])
+        for az in azs:
+            tazs.append(az)
+        for alt in alts:
+            talts.append(alt)
+
+        tsteps = f.tsteps
+        tmax = 0
+#find (alt,az) of sun, where we were pointing, and their separation
+        for ti,tv in enumerate(tsteps):
+            f.obs.date = tv
+            sun.compute(f.obs)
+# create object at latest telescope Alt/Az
+# so we can calculate the separation from sun
+            srtbod = ephem.FixedBody(epoch=ephem.B1950)
+            ra,dec = f.obs.radec_of(str(azs[ti]),str(alts[ti]))  #current ra/dec in B1950
+            srtbod._ra = str(ra)
+            srtbod._dec = str(dec)
+            srtbod.compute(f.obs)
+#            trk_az_off.append(srtbod.az - sun.az) #rad
+#            trk_alt_off.append(srtbod.alt - sun.alt) #rad
+
+# line up the objects to compute offset in each direction
+            trk_az_off.append(ephem.separation((srtbod.az, srtbod.alt), (sun.az, srtbod.alt)))
+            trk_alt_off.append(ephem.separation((srtbod.az, srtbod.alt), (srtbod.az, sun.alt)))
+            seps.append(float(ephem.separation((srtbod.az, srtbod.alt), (sun.az, sun.alt))))  #ra sep.
+
+
+    idcs = np.where(np.array(seps) < threshold*np.pi/180.)[0]
+#convert rad --> deg
+    trk_az_off = np.array(trk_az_off)*180./np.pi
+    trk_alt_off = np.array(trk_alt_off)*180./np.pi
+    tazs = np.array(tazs)
+    talts = np.array(talts)
+#plot the az and alt offsets
+    plt.subplot(2,1,1)
+    plt.plot(tazs[idcs],trk_az_off[idcs],'b+')
+    plt.xlabel('telescope azimuth')
+    plt.ylabel('aziumuthal separation [deg]')
+    plt.title('telescope.az - sun.az')
+    plt.subplot(2,1,2)
+    plt.plot(talts[idcs],trk_alt_off[idcs],'b+')
+    plt.xlabel('telescope altitude')
+    plt.ylabel('altitude separation [deg]')
+    plt.title('telescope.alt - sun.alt')
+
+    plt.show()
+
+def plot_trackoffsets3d(files, foy=False, threshold=360.):
+    """
+    given a list of SRTdata objects, plot the alt-az pointing
+    offset from the sun using (az/alt or fraction of year as 3rd axis)/.
+
+    Args:
+    files = list of srt data files/objects
+    foy = use fraction of year as third axis (True), or az/alt (default)
+    threshold = only plot points within this many degrees
+
+    """
+
+#prep the data
+    sun = ephem.Sun(epoch=ephem.B1950)
+    tazs = []
+    talts = []
+    trk_az_off = []
+    trk_alt_off = []
+    foys = []
+    seps = []
     for f in files:
     
         azs = (f.data_info['az'] + f.data_info['az_off'])
@@ -436,30 +513,54 @@ def plot_trackoffsets(files):
             srtbod._dec = str(dec)
             srtbod._epoch = ephem.B1950 #'1950'
             srtbod.compute(f.obs)
-            trk_az_off.append(srtbod.az - sun.az) #rad
-            trk_alt_off.append(srtbod.alt - sun.alt) #rad
+#            trk_az_off.append(srtbod.az - sun.az) #rad
+#            trk_alt_off.append(srtbod.alt - sun.alt) #rad
+
+# line up the objects to compute offset in each direction
+            trk_az_off.append(ephem.separation((srtbod.az, srtbod.alt), (sun.az, srtbod.alt)))
+            trk_alt_off.append(ephem.separation((srtbod.az, srtbod.alt), (srtbod.az, sun.alt)))
+            seps.append(ephem.separation(srtbod, sun))
+            foys.append(year_fraction(tv))
             
+    idcs = np.where(np.array(seps) < threshold*np.pi/180.)[0]
 #convert rad --> deg
     trk_az_off = np.array(trk_az_off)*180./np.pi
     trk_alt_off = np.array(trk_alt_off)*180./np.pi
+    tazs = np.array(tazs)
+    talts = np.array(talts)
 #plot the az and alt offsets
-    plt.subplot(2,1,1)
-    plt.plot(tazs,trk_az_off,'b+')
-    plt.xlabel('telescope azimuth')
-    plt.ylabel('aziumuthal separation [deg]')
-    plt.title('telescope.az - sun.az')
-    plt.subplot(2,1,2)
-    plt.plot(talts,trk_alt_off,'b+')
-    plt.xlabel('telescope altitude')
-    plt.ylabel('altitude separation [deg]')
-    plt.title('telescope.alt - sun.alt')
+    fig = plt.figure(1)
+    ax1 = fig.add_subplot(1, 1, 1, projection='3d')
+    if not foy:
+        ax1.scatter(tazs[idcs], talts[idcs], trk_az_off[idcs], '+')
+        ax1.set_ylabel('altitude [deg]')
+    else:
+        ax1.scatter(tazs[idcs], foys[idcs], trk_az_off[idcs], '+')
+        ax1.set_ylabel('fraction of year')
+    ax1.set_xlabel('telescope azimuth')
+    ax1.set_zlabel('aziumuthal separation [deg]')
+    ax1.set_title('telescope.az - sun.az')
+    print "Close window to continue..."
+    plt.show()
+    plt.clf()
 
+    fig = plt.figure(1)
+    ax2 = fig.add_subplot(1, 1, 1, projection='3d')
+    if not foy:
+        ax2.scatter(tazs[idcs], talts[idcs], trk_alt_off[idcs], '+')
+        ax2.set_ylabel('altitude [deg]')
+    else:
+        ax2.scatter(tazs[idcs], foys[idcs], trk_alt_off[idcs], '+')
+        ax2.set_ylabel('fraction of year')
+    ax2.set_xlabel('telescope azimuth')
+    ax2.set_zlabel('altitude separation [deg]')
+    ax2.set_title('telescope.alt - sun.alt')
     plt.show()
 
 def plot_npointoffsets(files):
     """
     given a list of SRTdata objects, plot the alt-az pointing
-    offset from the sun.
+    offset from the sun as determined by the NPOINT scans
 
     """
     
@@ -497,7 +598,74 @@ def plot_npointoffsets(files):
     plt.ylabel('azimuthal offset')
     
     plt.show()
+
+def plot_npointoffsets3d(files, foy=False):
+    """
+    given a list of SRTdata objects, plot the alt-az pointing
+    offset reported by the NPOINT scans of the sun (in 3d).
+
+    Args:
+    files : list of srt data files
+    foy : use fraction of year as the 3rd dimensions [default = False]
+
+    """
     
+    azs = []
+    alts = []
+    dazs = []
+    dalts = []
+    foys = []
+
+    for f in files:
+        npoints = f.npoints
+        for t, az, alt, daz, dalt in npoints:
+            azs.append(az)
+            alts.append(alt)
+            dazs.append(daz)
+            dalts.append(dalt)
+            foys.append(year_fraction(t))
+
+    fig = plt.figure(1)
+    ax1 = fig.add_subplot(1,2,1, projection='3d')
+#    ax1.plot(azs,dazs,'+')
+    if not foy:
+        ax1.scatter(azs, alts, dazs,'+')
+        ax1.set_ylabel('altitude [deg]')
+    else:
+        ax1.scatter(azs, foys, dazs,'+')
+        ax1.set_ylabel('fraction of year')
+    ax1.set_title('az offset')
+    ax1.set_xlabel('azimuth [deg]')
+    ax1.set_zlabel('azimuthal offset')
+        
+
+    ax3 = fig.add_subplot(1,2,2, projection='3d')
+#    ax3.plot(alts,dazs,'+')
+    if not foy:
+        ax3.scatter(alts, azs, dalts, '+')
+        ax3.set_ylabel('azimuth [deg]')
+    else:
+        ax3.scatter(alts, foys, dalts, '+')
+        ax3.set_ylabel('fraction of year')
+    ax3.set_title('alt offset')
+    ax3.set_xlabel('altitude [deg]')
+    ax3.set_zlabel('altitude offset')
+
+#    ax2 = fig.add_subplot(2,2,3, projection='3d')
+#    ax2.plot(azs,dalts,'+')
+#    ax2.set_xlabel('azimuth [deg]')
+#    ax2.set_ylabel('altitude offset')
+#    ax2.set_zlabel('altitude offset')
+
+#    ax4 = fig.add_subplot(2,2,4, projection='3d')
+#    ax4.plot(alts,dalts,'+')
+#    ax4.set_xlabel('altitude [deg]')
+#    ax4.set_ylabel('azimuthal offset')
+#    ax4.set_zlabel('')
+    
+    plt.show()
+
+
 #######################
 
 def replaceYMD(date):
@@ -536,6 +704,22 @@ def juldate2mjd(num):
     """Convert Juliand date to MJD"""
     return float(num - 2400000.5)
 
+def year_fraction(date):
+    """return the fraction of the year for this datetime object"""
+    def sinceEpoch(date): #seconds since epoch
+        return time.mktime(date.timetuple())
+    s = sinceEpoch
+
+    year = date.year
+    startOfThisYear = datetime.datetime(year=year, month=1, day=1)
+    startOfNextYear = datetime.datetime(year=year+1, month=1, day=1)
+
+    yearElapsed = s(date) - s(startOfThisYear)
+    yearDuration = s(startOfNextYear) - s(startOfThisYear)
+    fraction = yearElapsed/yearDuration
+
+    return fraction
+        
 
 if __name__ == '__main__':
     
@@ -558,8 +742,10 @@ if __name__ == '__main__':
     parser.add_option("--ignoreYMD",dest="ignoreYMD",
                       action='store_true',
                       default=False,
-                      help="Plot the individual channel intensities."\
-                          "Eg. --chanlist=1,3,55  (zero-indexed)")
+                      help="ignore the year/month/day timestamps? in intensity plots"\
+                          "useful if comparing data on sequential days"\
+                          "(like the day before and day-of an eclipse)"
+                      )
     parser.add_option("-t","--plottracks",
                       action='store_true',
                       dest='plottracks',
@@ -570,16 +756,31 @@ if __name__ == '__main__':
                       dest='plottrackoffsets',
                       default=False,
                       help="Plot AZ ALT tracking offsets from sun")
+    parser.add_option("-e","--plottracksoffsets3d",
+                      action='store_true',
+                      dest='plottrackoffsets3d',
+                      default=False,
+                      help="Plot AZ ALT tracking offsets from sun (in 3d)")
     parser.add_option("-n","--plotnpointoffsets",
                       action='store_true',
                       dest='plotnpointoffsets',
                       default=False,
                       help="Plot AZ ALT tracking offsets from sun, as determined by npoint scans")
-    parser.add_option("--playsound",dest="playsound",
+    parser.add_option("-m","--plotnpointoffsets3d",
                       action='store_true',
+                      dest='plotnpointoffsets3d',
                       default=False,
-                      help="Map the total intensity onto audio frequencies"\
-                          "and make some noise (requires scikits.audiolab)")
+                      help="Plot AZ ALT tracking offsets from sun, as determined by npoint scans (in 3d)")
+    parser.add_option("--fracofyear",
+                      action='store_true',
+                      dest='fracofyear',
+                      default=False,
+                      help="Plot the offsets, using fraction of year as 3rd dimension. (used in 3d plots only)")
+    parser.add_option("--threshold",
+                      dest='threshold',
+                      default=360.,
+                      type='float',
+                      help="For all plots, only plot points within this distance [DEG] (helps cut npoint scanning).")
 
     (opts,args) = parser.parse_args()
     files = []
@@ -590,6 +791,7 @@ if __name__ == '__main__':
         else:
             print "Couldn't find %s. Skipping" % f
 
+    print "THRS", opts.threshold, type(opts.threshold)
     if files:
         #sort based on the first timestamp
         files = sorted(files,key=lambda f:f.tsteps[0])
